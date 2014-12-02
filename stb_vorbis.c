@@ -199,6 +199,18 @@ extern void stb_vorbis_flush_pushdata(stb_vorbis *f);
 // call stb_vorbis_flush_pushdata(), then start calling decoding, then once
 // decoding is returning you data, call stb_vorbis_get_sample_offset, and
 // if you don't like the result, seek your file again and repeat.
+
+extern void stb_vorbis_flush_at_page_pushdata(
+         stb_vorbis *f, unsigned int frames_to_skip);
+// inform stb_vorbis that your next datablock will be the beginning of a
+// page, but won't be contiguous with previous datablocks. Future attempts
+// to decode will skip the first frames_to_skip frames, then resume decoding.
+
+extern void stb_vorbis_get_page_offsets_pushdata(stb_vorbis *f, int *first, int *last);
+// stb_vorbis keeps track of page header offsets found in the most recently
+// pushed datablock. *first will contain the first page header offset that
+// was found, and *last the last. If no page header was found, *first and *last
+// will contain -1.
 #endif
 
 
@@ -819,6 +831,9 @@ struct stb_vorbis
    int page_crc_tests; // only in push_mode: number of tests active; -1 if not searching
 #ifndef STB_VORBIS_NO_PUSHDATA_API
    CRCscan scan[STB_VORBIS_PUSHDATA_CRC_COUNT];
+   int page_offset[2];
+   unsigned int frames_to_skip;
+   int first_skip;
 #endif
 
   // sample-access
@@ -3539,6 +3554,8 @@ static int is_whole_packet_present(stb_vorbis *f, int end_page)
    int s = f->next_seg, first = TRUE;
    uint8 *p = f->stream;
 
+   f->page_offset[0] = f->page_offset[1] = -1;
+
    if (s != -1) { // if we're not starting the packet with a 'continue on next page' flag
       for (; s < f->segment_count; ++s) {
          p += f->segments[s];
@@ -3572,6 +3589,9 @@ static int is_whole_packet_present(stb_vorbis *f, int end_page)
       }
       n = p[26]; // segment counts
       q = p+27;  // q points to segment table
+      if (f->page_offset[0] == -1)
+         f->page_offset[0] = p - f->stream; // first page header found
+      f->page_offset[1] = p - f->stream; // last page header found
       p = q + n; // advance past header
       // make sure we've read the segment table
       if (p > f->stream_end)                     return error(f, VORBIS_need_more_data);
@@ -4237,6 +4257,18 @@ void stb_vorbis_flush_pushdata(stb_vorbis *f)
    f->samples_output = 0;
    f->channel_buffer_start = 0;
    f->channel_buffer_end = 0;
+   f->frames_to_skip = 0;
+}
+
+void stb_vorbis_flush_at_page_pushdata(stb_vorbis *f, unsigned int frames_to_skip)
+{
+   stb_vorbis_flush_pushdata(f);
+   f->page_crc_tests = -1;
+   f->next_seg = -1;
+   f->current_loc = ~0;
+   f->current_loc_valid = FALSE;
+   f->frames_to_skip = frames_to_skip;
+   f->first_skip = TRUE;
 }
 
 static int vorbis_search_for_page_pushdata(vorb *f, uint8 *data, int data_len)
@@ -4358,6 +4390,21 @@ int stb_vorbis_decode_frame_pushdata(
       return 0;
    }
 
+   if (f->frames_to_skip > 0) {
+      *samples = 0;
+      // ignore continued packet if this is our first skip
+      if (maybe_start_packet(f))
+         --f->frames_to_skip;
+      else {
+         if (f->error == VORBIS_continued_packet_flag_invalid && f->first_skip)
+            f->error = VORBIS__no_error;
+      }
+
+      flush_packet(f);
+      f->first_skip = FALSE;
+      return f->stream - data;
+   }
+
    if (!vorbis_decode_packet(f, &len, &left, &right)) {
       // save the actual error we encountered
       enum STBVorbisError error = f->error;
@@ -4427,6 +4474,12 @@ stb_vorbis *stb_vorbis_open_pushdata(
       vorbis_deinit(&p);
       return NULL;
    }
+}
+
+void stb_vorbis_get_page_offsets_pushdata(stb_vorbis *f, int *first, int *last)
+{
+   *first = f->page_offset[0];
+   *last = f->page_offset[1];
 }
 #endif // STB_VORBIS_NO_PUSHDATA_API
 
